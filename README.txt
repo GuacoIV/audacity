@@ -1,3 +1,8 @@
+Build Instructions on Udacity VM
+From terminal, run ./Prepare_VM_for_Build.sh
+Then, run the VS Code build configuration (F5)
+
+
 Audacity(R): free, open source, cross-platform audio software for 
 multi-track recording and editing: https://www.audacityteam.org/ . 
 
