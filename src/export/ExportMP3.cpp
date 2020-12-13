@@ -78,6 +78,9 @@
 #include <wx/timer.h>
 #include <wx/utils.h>
 #include <wx/window.h>
+#include <future>
+#include <vector>
+#include <thread>
 
 #include "../FileNames.h"
 #include "../float_cast.h"
@@ -1666,6 +1669,19 @@ static void dump_config( 	lame_global_flags*	gfp )
 }
 #endif
 
+class ExportWorkerResult
+{
+   public:
+   ArrayOf<unsigned char> mOutput;
+   int mNumBytes;
+
+   ExportWorkerResult(ArrayOf<unsigned char> output, int numBytes)
+   {
+      mOutput = std::move(output);
+      mNumBytes = numBytes;
+   }
+};
+
 //----------------------------------------------------------------------------
 // ExportMP3
 //----------------------------------------------------------------------------
@@ -1699,6 +1715,35 @@ private:
    void AddFrame(struct id3_tag *tp, const wxString & n, const wxString & v, const char *name);
 #endif
    int SetNumExportChannels() override;
+   static ExportWorkerResult Worker(Mixer* mixer, int inSamples, int channels, MP3Exporter* exporter, ArrayOf<unsigned char> buffer)
+   {
+         int bytes = 0;
+         auto blockLen = mixer->Process(inSamples);
+
+         if (blockLen == 0)
+            return ExportWorkerResult(std::move(buffer), bytes);
+
+         float *mixed = (float *)mixer->GetBuffer();
+
+         if ((int)blockLen < inSamples) {
+            if (channels > 1) {
+               bytes = exporter->EncodeRemainder(mixed, blockLen, buffer.get());
+            }
+            else {
+               bytes = exporter->EncodeRemainderMono(mixed, blockLen, buffer.get());
+            }
+         }
+         else {
+            if (channels > 1) {
+               bytes = exporter->EncodeBuffer(mixed, buffer.get());
+            }
+            else {
+               bytes = exporter->EncodeBufferMono(mixed, buffer.get());
+            }
+         }
+
+      return ExportWorkerResult(std::move(buffer), bytes);
+   }
 };
 
 ExportMP3::ExportMP3()
@@ -1736,7 +1781,6 @@ int ExportMP3::SetNumExportChannels()
 
    return (mono)? 1 : -1;
 }
-
 
 ProgressResult ExportMP3::Export(AudacityProject *project,
                        std::unique_ptr<ProgressDialog> &pDialog,
@@ -1895,14 +1939,26 @@ ProgressResult ExportMP3::Export(AudacityProject *project,
       return ProgressResult::Cancelled;
    }
 
-   ArrayOf<unsigned char> buffer{ bufferSize };
-   wxASSERT(buffer);
+   const unsigned int numThreads = 4;
 
+   ArraysOf<unsigned char> buffers{ numThreads, bufferSize };
+   int mixerNum = 0;
+
+   wxASSERT(buffers);
    {
-      auto mixer = CreateMixer(tracks, selectionOnly,
-         t0, t1,
+      std::unique_ptr<Mixer> mixers [numThreads];
+      double clipDuration = 5;
+      //TODO: clips less than 5 seconds, etc.
+      int clipSeg = 0;
+      for (int clipSeg = 0; clipSeg < numThreads; clipSeg++)
+      {
+         double startTime = t0 + (clipDuration * clipSeg);
+         double endTime = startTime + clipDuration;
+         mixers[clipSeg] = std::move(CreateMixer(tracks, selectionOnly,
+         startTime, endTime,
          channels, inSamples, true,
-         rate, floatSample, true, mixerSpec);
+         rate, floatSample, true, mixerSpec));
+      }
 
       TranslatableString title;
       if (rmode == MODE_SET) {
@@ -1927,31 +1983,20 @@ ProgressResult ExportMP3::Export(AudacityProject *project,
       InitProgress( pDialog, fName, title );
       auto &progress = *pDialog;
 
+      std::vector<std::future<ExportWorkerResult>> futures;
+      for (int i = 0; i < numThreads; i++)
+         futures.emplace_back(std::async(std::launch::async, ExportMP3::Worker, mixers[i].get(), inSamples, channels, &exporter /*TODO: not thread safe*/, std::move(buffers[i])));
+
       while (updateResult == ProgressResult::Success) {
-         auto blockLen = mixer->Process(inSamples);
 
-         if (blockLen == 0) {
-            break;
-         }
+         auto future = std::move(futures.back());
+         futures.pop_back();
+         ExportWorkerResult result = future.get();
+         int bytes = result.mNumBytes;
+         ArrayOf<unsigned char> buffer = std::move(result.mOutput);
 
-         float *mixed = (float *)mixer->GetBuffer();
-
-         if ((int)blockLen < inSamples) {
-            if (channels > 1) {
-               bytes = exporter.EncodeRemainder(mixed, blockLen, buffer.get());
-            }
-            else {
-               bytes = exporter.EncodeRemainderMono(mixed, blockLen, buffer.get());
-            }
-         }
-         else {
-            if (channels > 1) {
-               bytes = exporter.EncodeBuffer(mixed, buffer.get());
-            }
-            else {
-               bytes = exporter.EncodeBufferMono(mixed, buffer.get());
-            }
-         }
+         if (bytes == 0)
+            break;      
 
          if (bytes < 0) {
             auto msg = XO("Error %ld returned from MP3 encoder")
@@ -1968,13 +2013,21 @@ ProgressResult ExportMP3::Export(AudacityProject *project,
             break;
          }
 
-         updateResult = progress.Update(mixer->MixGetCurrentTime() - t0, t1 - t0);
+         mixerNum = clipSeg % 4;
+         updateResult = progress.Update(mixers[mixerNum]->MixGetCurrentTime() - t0, t1 - t0);
+         if (clipSeg == 10) //TODO: for now
+            break;
+
+         clipSeg++;
+         mixerNum = clipSeg % 4;
+         mixers[mixerNum]->Reposition(mixers[mixerNum]->MixGetCurrentTime() + 5);
+         futures.emplace_back(std::async(std::launch::async, ExportMP3::Worker, mixers[mixerNum].get(), inSamples, channels, &exporter, std::move(buffers[mixerNum])));
       }
    }
 
    if ( updateResult == ProgressResult::Success ||
         updateResult == ProgressResult::Stopped ) {
-      bytes = exporter.FinishStream(buffer.get());
+      bytes = exporter.FinishStream(buffers[mixerNum].get());
 
       if (bytes < 0) {
          // TODO: more precise message
@@ -1983,7 +2036,7 @@ ProgressResult ExportMP3::Export(AudacityProject *project,
       }
 
       if (bytes > 0) {
-         if (bytes > (int)outFile.Write(buffer.get(), bytes)) {
+         if (bytes > (int)outFile.Write(buffers[mixerNum].get(), bytes)) {
             // TODO: more precise message
             ShowExportErrorDialog("MP3:1988");
             return ProgressResult::Cancelled;
