@@ -1798,33 +1798,11 @@ ProgressResult ExportMP3::Export(AudacityProject *project,
    wxWindow *parent = ProjectWindow::Find( project );
 #endif // DISABLE_DYNAMIC_LOADING_LAME
    const auto &tracks = TrackList::Get( *project );
-   MP3Exporter exporter;
 
-#ifdef DISABLE_DYNAMIC_LOADING_LAME
-   if (!exporter.InitLibrary(wxT(""))) {
-      AudacityMessageBox( XO("Could not initialize MP3 encoding library!") );
-      gPrefs->Write(wxT("/MP3/MP3LibPath"), wxString(wxT("")));
-      gPrefs->Flush();
+   const unsigned int numThreads = 4;
 
-      return ProgressResult::Cancelled;
-   }
-#else
-   if (!exporter.LoadLibrary(parent, MP3Exporter::Maybe)) {
-      AudacityMessageBox( XO("Could not open MP3 encoding library!") );
-      gPrefs->Write(wxT("/MP3/MP3LibPath"), wxString(wxT("")));
-      gPrefs->Flush();
-
-      return ProgressResult::Cancelled;
-   }
-
-   if (!exporter.ValidLibraryLoaded()) {
-      AudacityMessageBox( XO("Not a valid or supported MP3 encoding library!") );
-      gPrefs->Write(wxT("/MP3/MP3LibPath"), wxString(wxT("")));
-      gPrefs->Flush();
-
-      return ProgressResult::Cancelled;
-   }
-#endif // DISABLE_DYNAMIC_LOADING_LAME
+   MP3Exporter exporter[numThreads];
+   int inSamples [numThreads];
 
    // Retrieve preferences
    int highrate = 48000;
@@ -1840,70 +1818,99 @@ ProgressResult ExportMP3::Export(AudacityProject *project,
    auto cmode = MP3ChannelModeSetting.ReadEnumWithDefault( CHANNEL_STEREO );
    gPrefs->Read(wxT("/FileFormats/MP3ForceMono"), &forceMono, 0);
 
-   // Set the bitrate/quality and mode
-   if (rmode == MODE_SET) {
-      brate = ValidateValue(setRateNames.size(), brate, PRESET_STANDARD);
-      int r = ValidateValue( varModeNames.size(), vmode, ROUTINE_FAST );
-      exporter.SetMode(MODE_SET);
-      exporter.SetQuality(brate, r);
-   }
-   else if (rmode == MODE_VBR) {
-      brate = ValidateValue( varRateNames.size(), brate, QUALITY_2 );
-      int r = ValidateValue( varModeNames.size(), vmode, ROUTINE_FAST );
-      exporter.SetMode(MODE_VBR);
-      exporter.SetQuality(brate, r);
-   }
-   else if (rmode == MODE_ABR) {
-      brate = ValidateIndex( fixRateValues, brate, 6 /* 128 kbps */ );
-      bitrate = fixRateValues[ brate ];
-      exporter.SetMode(MODE_ABR);
-      exporter.SetBitrate(bitrate);
+   for (int i = 0; i < numThreads; i++)
+   {
+   #ifdef DISABLE_DYNAMIC_LOADING_LAME
+      if (!exporter[i].InitLibrary(wxT(""))) {
+         AudacityMessageBox( XO("Could not initialize MP3 encoding library!") );
+         gPrefs->Write(wxT("/MP3/MP3LibPath"), wxString(wxT("")));
+         gPrefs->Flush();
 
-      if (bitrate > 160) {
-         lowrate = 32000;
-      }
-      else if (bitrate < 32 || bitrate == 144) {
-         highrate = 24000;
-      }
-   }
-   else {
-      brate = ValidateIndex( fixRateValues, brate, 6 /* 128 kbps */ );
-      bitrate = fixRateValues[ brate ];
-      exporter.SetMode(MODE_CBR);
-      exporter.SetBitrate(bitrate);
-
-      if (bitrate > 160) {
-         lowrate = 32000;
-      }
-      else if (bitrate < 32 || bitrate == 144) {
-         highrate = 24000;
-      }
-   }
-
-   // Verify sample rate
-   if (!make_iterator_range( sampRates ).contains( rate ) ||
-      (rate < lowrate) || (rate > highrate)) {
-      rate = AskResample(bitrate, rate, lowrate, highrate);
-      if (rate == 0) {
          return ProgressResult::Cancelled;
       }
-   }
+   #else
+      if (!exporter[i].LoadLibrary(parent, MP3Exporter::Maybe)) {
+         AudacityMessageBox( XO("Could not open MP3 encoding library!") );
+         gPrefs->Write(wxT("/MP3/MP3LibPath"), wxString(wxT("")));
+         gPrefs->Flush();
 
-   // Set the channel mode
-   if (forceMono) {
-      exporter.SetChannel(CHANNEL_MONO);
-   }
-   else if (cmode == CHANNEL_JOINT) {
-      exporter.SetChannel(CHANNEL_JOINT);
-   }
-   else {
-      exporter.SetChannel(CHANNEL_STEREO);
-   }
+         return ProgressResult::Cancelled;
+      }
 
-   auto inSamples = exporter.InitializeStream(channels, rate);
-   if (((int)inSamples) < 0) {
-      AudacityMessageBox( XO("Unable to initialize MP3 stream") );
-      return ProgressResult::Cancelled;
+      if (!exporter[i].ValidLibraryLoaded()) {
+         AudacityMessageBox( XO("Not a valid or supported MP3 encoding library!") );
+         gPrefs->Write(wxT("/MP3/MP3LibPath"), wxString(wxT("")));
+         gPrefs->Flush();
+
+         return ProgressResult::Cancelled;
+      }
+   #endif // DISABLE_DYNAMIC_LOADING_LAME
+
+      // Set the bitrate/quality and mode
+      if (rmode == MODE_SET) {
+         brate = ValidateValue(setRateNames.size(), brate, PRESET_STANDARD);
+         int r = ValidateValue( varModeNames.size(), vmode, ROUTINE_FAST );
+         exporter[i].SetMode(MODE_SET);
+         exporter[i].SetQuality(brate, r);
+      }
+      else if (rmode == MODE_VBR) {
+         brate = ValidateValue( varRateNames.size(), brate, QUALITY_2 );
+         int r = ValidateValue( varModeNames.size(), vmode, ROUTINE_FAST );
+         exporter[i].SetMode(MODE_VBR);
+         exporter[i].SetQuality(brate, r);
+      }
+      else if (rmode == MODE_ABR) {
+         brate = ValidateIndex( fixRateValues, brate, 6 /* 128 kbps */ );
+         bitrate = fixRateValues[ brate ];
+         exporter[i].SetMode(MODE_ABR);
+         exporter[i].SetBitrate(bitrate);
+
+         if (bitrate > 160) {
+            lowrate = 32000;
+         }
+         else if (bitrate < 32 || bitrate == 144) {
+            highrate = 24000;
+         }
+      }
+      else {
+         brate = ValidateIndex( fixRateValues, brate, 6 /* 128 kbps */ );
+         bitrate = fixRateValues[ brate ];
+         exporter[i].SetMode(MODE_CBR);
+         exporter[i].SetBitrate(bitrate);
+
+         if (bitrate > 160) {
+            lowrate = 32000;
+         }
+         else if (bitrate < 32 || bitrate == 144) {
+            highrate = 24000;
+         }
+      }
+
+      // Verify sample rate
+      if (!make_iterator_range( sampRates ).contains( rate ) ||
+         (rate < lowrate) || (rate > highrate)) {
+         rate = AskResample(bitrate, rate, lowrate, highrate);
+         if (rate == 0) {
+            return ProgressResult::Cancelled;
+         }
+      }
+
+      // Set the channel mode
+      if (forceMono) {
+         exporter[i].SetChannel(CHANNEL_MONO);
+      }
+      else if (cmode == CHANNEL_JOINT) {
+         exporter[i].SetChannel(CHANNEL_JOINT);
+      }
+      else {
+         exporter[i].SetChannel(CHANNEL_STEREO);
+      }
+
+      inSamples[i] = exporter[i].InitializeStream(channels, rate);
+      if (((int)inSamples[i]) < 0) {
+         AudacityMessageBox( XO("Unable to initialize MP3 stream") );
+         return ProgressResult::Cancelled;
+      }
    }
 
    // Put ID3 tags at beginning of file
@@ -1932,14 +1939,12 @@ ProgressResult ExportMP3::Export(AudacityProject *project,
    auto updateResult = ProgressResult::Success;
    int bytes = 0;
 
-   size_t bufferSize = std::max(0, exporter.GetOutBufferSize());
+   size_t bufferSize = std::max(0, exporter[0].GetOutBufferSize());
    if (bufferSize <= 0) {
       // TODO: more precise message
       ShowExportErrorDialog("MP3:1849");
       return ProgressResult::Cancelled;
    }
-
-   const unsigned int numThreads = 4;
 
    ArraysOf<unsigned char> buffers{ numThreads, bufferSize };
    int mixerNum = 0;
@@ -1956,7 +1961,7 @@ ProgressResult ExportMP3::Export(AudacityProject *project,
          double endTime = startTime + clipDuration;
          mixers[clipSeg] = std::move(CreateMixer(tracks, selectionOnly,
          startTime, endTime,
-         channels, inSamples, true,
+         channels, inSamples[clipSeg], true,
          rate, floatSample, true, mixerSpec));
       }
 
@@ -1982,10 +1987,10 @@ ProgressResult ExportMP3::Export(AudacityProject *project,
 
       InitProgress( pDialog, fName, title );
       auto &progress = *pDialog;
-
+      
       std::vector<std::future<ExportWorkerResult>> futures;
       for (int i = 0; i < numThreads; i++)
-         futures.emplace_back(std::async(std::launch::async, ExportMP3::Worker, mixers[i].get(), inSamples, channels, &exporter /*TODO: not thread safe*/, std::move(buffers[i])));
+         futures.emplace_back(std::async(std::launch::async, ExportMP3::Worker, mixers[i].get(), inSamples, channels, exporter[i], std::move(buffers[i])));
 
       while (updateResult == ProgressResult::Success) {
 
@@ -2021,13 +2026,13 @@ ProgressResult ExportMP3::Export(AudacityProject *project,
          clipSeg++;
          mixerNum = clipSeg % 4;
          mixers[mixerNum]->Reposition(mixers[mixerNum]->MixGetCurrentTime() + 5);
-         futures.emplace_back(std::async(std::launch::async, ExportMP3::Worker, mixers[mixerNum].get(), inSamples, channels, &exporter, std::move(buffers[mixerNum])));
+         futures.emplace_back(std::async(std::launch::async, ExportMP3::Worker, mixers[mixerNum].get(), inSamples, channels, exporter[mixerNum], std::move(buffers[mixerNum])));
       }
    }
 
    if ( updateResult == ProgressResult::Success ||
         updateResult == ProgressResult::Stopped ) {
-      bytes = exporter.FinishStream(buffers[mixerNum].get());
+      int bytes = exporter[mixerNum].FinishStream(buffers[mixerNum].get());
 
       if (bytes < 0) {
          // TODO: more precise message
@@ -2058,7 +2063,7 @@ ProgressResult ExportMP3::Export(AudacityProject *project,
       //
       // Also, if beWriteInfoTag() is used, mGF will no longer be valid after
       // this call, so do not use it.
-      if (!exporter.PutInfoTag(outFile, pos) ||
+      if (!exporter[mixerNum].PutInfoTag(outFile, pos) ||
           !outFile.Flush() ||
           !outFile.Close()) {
          // TODO: more precise message
