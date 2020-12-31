@@ -1963,6 +1963,7 @@ for (int i = 0; i < numThreads; i++)
 
    
       std::unique_ptr<Mixer> mixers [numThreads];
+      double mixerStartTimes [numThreads];
       double clipDuration = 5;
 
       TranslatableString title;
@@ -1993,11 +1994,12 @@ for (int i = 0; i < numThreads; i++)
       {
          double startTime = t0 + (clipDuration * i);
          double endTime = startTime + clipDuration;
+         mixerStartTimes[i] = startTime; //Since mixer itself gets moved between threads, keep track of start times
          mixers[i] = std::move(CreateMixer(tracks, selectionOnly,
          startTime, endTime,
          channels, inSamples, true,
          rate, floatSample, true, mixerSpec));
-         futures.push(std::async(std::launch::async, &ExportMP3::Worker, std::move(mixers[i]), inSamples, channels, &exporter[i], bufferSize));
+         futures.push(std::async(std::launch::deferred, &ExportMP3::Worker, std::move(mixers[i]), inSamples, channels, &exporter[i], bufferSize));
       }
 
       while (updateResult == ProgressResult::Success) {
@@ -2037,18 +2039,17 @@ for (int i = 0; i < numThreads; i++)
             updateResult = progress.Update(mixers[mixerNum]->MixGetCurrentTime() - t0, t1 - t0);
          }
 
-         if (mixerNum == 3) //TODO: for now
+         if (mixers[mixerNum]->MixGetCurrentTime() >= t1)
             break;
 
-
-         //mixers[mixerNum]->Reposition(mixers[(mixerNum + (numThreads - 1)) % numThreads]->MixGetCurrentTime() + 5);
-         //int startTime = mixers[(mixerNum + (numThreads - 1)) % numThreads]->MixGetCurrentTime() + clipDuration;
-         // int endTime = startTime + clipDuration;
-         //mixers[mixerNum] = std::move(CreateMixer(tracks, selectionOnly,
-         //startTime, endTime,
-         //channels, inSamples, true,
-         //rate, floatSample, true, mixerSpec));
-         //futures.push(std::async(std::launch::async, &ExportMP3::Worker, mixers[mixerNum].get(), inSamples, channels, &exporter[mixerNum], std::move(buffers[mixerNum])));
+         int startTime = mixerStartTimes[(mixerNum + (numThreads - 1)) % numThreads] + clipDuration;
+         int endTime = startTime + clipDuration;
+         mixers[mixerNum] = std::move(CreateMixer(tracks, selectionOnly,
+         startTime, endTime,
+         channels, inSamples, true,
+         rate, floatSample, true, mixerSpec));
+         mixerStartTimes[mixerNum] = startTime;
+         futures.push(std::async(std::launch::deferred, &ExportMP3::Worker, std::move(mixers[mixerNum]), inSamples, channels, &exporter[mixerNum], bufferSize));
          mixerNum = ++mixerNum % numThreads;
       }
    
