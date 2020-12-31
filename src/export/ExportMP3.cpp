@@ -81,6 +81,7 @@
 #include <future>
 #include <vector>
 #include <thread>
+#include <queue>
 
 #include "../FileNames.h"
 #include "../float_cast.h"
@@ -1672,13 +1673,15 @@ static void dump_config( 	lame_global_flags*	gfp )
 class ExportWorkerResult
 {
    public:
-   ArrayOf<unsigned char> mOutput;
-   int mNumBytes;
+   std::vector<ArrayOf<unsigned char>> mOutput;
+   std::vector<int> mByteCounts;
+   std::unique_ptr<Mixer> mMixer;
 
-   ExportWorkerResult(ArrayOf<unsigned char> output, int numBytes)
+   ExportWorkerResult(std::vector<ArrayOf<unsigned char>> output, std::vector<int> byteCounts, std::unique_ptr<Mixer> mixer)
    {
       mOutput = std::move(output);
-      mNumBytes = numBytes;
+      mByteCounts = byteCounts;
+      mMixer = std::move(mixer);
    }
 };
 
@@ -1715,34 +1718,46 @@ private:
    void AddFrame(struct id3_tag *tp, const wxString & n, const wxString & v, const char *name);
 #endif
    int SetNumExportChannels() override;
-   static ExportWorkerResult Worker(Mixer* mixer, int inSamples, int channels, MP3Exporter* exporter, ArrayOf<unsigned char> buffer)
+   static ExportWorkerResult Worker(std::unique_ptr<Mixer> mixer, int inSamples, int channels, MP3Exporter* exporter, unsigned int bufferSize)
    {
-         int bytes = 0;
-         auto blockLen = mixer->Process(inSamples);
+         std::vector<int> byteCounts;
+         std::vector<ArrayOf<unsigned char>> buffers;
+         int i = 0;
+         int bytes;
+         while (true)
+         {
+            ArrayOf<unsigned char> buffer { bufferSize };
+            bytes = 0;
+            auto blockLen = mixer->Process(inSamples);
 
-         if (blockLen == 0)
-            return ExportWorkerResult(std::move(buffer), bytes);
+            if (blockLen == 0)
+               return ExportWorkerResult(std::move(buffers), byteCounts, std::move(mixer));
 
-         float *mixed = (float *)mixer->GetBuffer();
+            float *mixed = (float *)mixer->GetBuffer();
 
-         if ((int)blockLen < inSamples) {
-            if (channels > 1) {
-               bytes = exporter->EncodeRemainder(mixed, blockLen, buffer.get());
+            if ((int)blockLen < inSamples) {
+               if (channels > 1) {
+                  bytes = exporter->EncodeRemainder(mixed, blockLen, buffer.get());
+               }
+               else {
+                  bytes = exporter->EncodeRemainderMono(mixed, blockLen, buffer.get());
+               }
             }
             else {
-               bytes = exporter->EncodeRemainderMono(mixed, blockLen, buffer.get());
+               if (channels > 1) {
+                  bytes = exporter->EncodeBuffer(mixed, buffer.get());
+               }
+               else {
+                  bytes = exporter->EncodeBufferMono(mixed, buffer.get());
+               }
             }
-         }
-         else {
-            if (channels > 1) {
-               bytes = exporter->EncodeBuffer(mixed, buffer.get());
-            }
-            else {
-               bytes = exporter->EncodeBufferMono(mixed, buffer.get());
-            }
+
+            buffers.push_back(std::move(buffer));
+            byteCounts.push_back(bytes);
+            i++;
          }
 
-      return ExportWorkerResult(std::move(buffer), bytes);
+      return ExportWorkerResult(std::move(buffers), byteCounts, std::move(mixer));
    }
 };
 
@@ -1944,24 +1959,11 @@ for (int i = 0; i < numThreads; i++)
       return ProgressResult::Cancelled;
    }
 
-   ArraysOf<unsigned char> buffers{ numThreads, bufferSize };
    int mixerNum = 0;
 
-   wxASSERT(buffers);
-   {
+   
       std::unique_ptr<Mixer> mixers [numThreads];
       double clipDuration = 5;
-      //TODO: clips less than 5 seconds, etc.
-      int clipSeg = 0;
-      for (int clipSeg = 0; clipSeg < numThreads; clipSeg++)
-      {
-         double startTime = t0 + (clipDuration * clipSeg);
-         double endTime = startTime + clipDuration;
-         mixers[clipSeg] = std::move(CreateMixer(tracks, selectionOnly,
-         startTime, endTime,
-         channels, inSamples, true,
-         rate, floatSample, true, mixerSpec));
-      }
 
       TranslatableString title;
       if (rmode == MODE_SET) {
@@ -1986,49 +1988,75 @@ for (int i = 0; i < numThreads; i++)
       InitProgress( pDialog, fName, title );
       auto &progress = *pDialog;
 
-      std::vector<std::future<ExportWorkerResult>> futures;
+      std::queue<std::future<ExportWorkerResult>> futures;
       for (int i = 0; i < numThreads; i++)
-         futures.emplace_back(std::async(std::launch::async, ExportMP3::Worker, mixers[i].get(), inSamples, channels, &exporter[i] /*TODO: not thread safe*/, std::move(buffers[i])));
+      {
+         double startTime = t0 + (clipDuration * i);
+         double endTime = startTime + clipDuration;
+         mixers[i] = std::move(CreateMixer(tracks, selectionOnly,
+         startTime, endTime,
+         channels, inSamples, true,
+         rate, floatSample, true, mixerSpec));
+         futures.push(std::async(std::launch::async, &ExportMP3::Worker, std::move(mixers[i]), inSamples, channels, &exporter[i], bufferSize));
+      }
 
       while (updateResult == ProgressResult::Success) {
 
-         auto future = std::move(futures.back());
-         futures.pop_back();
+         auto future = std::move(futures.front());
+         futures.pop();
          ExportWorkerResult result = future.get();
-         int bytes = result.mNumBytes;
-         ArrayOf<unsigned char> buffer = std::move(result.mOutput);
+         std::vector<int> byteCounts = result.mByteCounts;
+         std::vector<ArrayOf<unsigned char>> buffers = std::move(result.mOutput);
+         mixers[mixerNum] = std::move(result.mMixer);
 
-         if (bytes == 0)
-            break;      
+         while (byteCounts.size() > 0)
+         {
+            int bytes = byteCounts.back();
+            byteCounts.pop_back();
+            ArrayOf<unsigned char> buffer = std::move(buffers.back());
+            buffers.pop_back();
 
-         if (bytes < 0) {
-            auto msg = XO("Error %ld returned from MP3 encoder")
-               .Format( bytes );
-            AudacityMessageBox( msg );
-            updateResult = ProgressResult::Cancelled;
-            break;
+            if (bytes == 0)
+               break;
+
+            if (bytes < 0) {
+               auto msg = XO("Error %ld returned from MP3 encoder")
+                  .Format( bytes );
+               AudacityMessageBox( msg );
+               updateResult = ProgressResult::Cancelled;
+               break;
+            }
+
+            if (bytes > (int)outFile.Write(buffer.get(), bytes)) {
+               // TODO: more precise message
+               ShowDiskFullExportErrorDialog();
+               updateResult = ProgressResult::Cancelled;
+               break;
+            }
+
+            updateResult = progress.Update(mixers[mixerNum]->MixGetCurrentTime() - t0, t1 - t0);
          }
 
-         if (bytes > (int)outFile.Write(buffer.get(), bytes)) {
-            // TODO: more precise message
-            ShowDiskFullExportErrorDialog();
-            updateResult = ProgressResult::Cancelled;
-            break;
-         }
-
-         updateResult = progress.Update(mixers[mixerNum]->MixGetCurrentTime() - t0, t1 - t0);
-         if (clipSeg == 10) //TODO: for now
+         if (mixerNum == 3) //TODO: for now
             break;
 
-         mixers[mixerNum]->Reposition(mixers[(mixerNum + (numThreads - 1)) % numThreads]->MixGetCurrentTime() + 5);
-         futures.emplace_back(std::async(std::launch::async, ExportMP3::Worker, mixers[mixerNum].get(), inSamples, channels, &exporter[mixerNum], std::move(buffers[mixerNum])));
+
+         //mixers[mixerNum]->Reposition(mixers[(mixerNum + (numThreads - 1)) % numThreads]->MixGetCurrentTime() + 5);
+         //int startTime = mixers[(mixerNum + (numThreads - 1)) % numThreads]->MixGetCurrentTime() + clipDuration;
+         // int endTime = startTime + clipDuration;
+         //mixers[mixerNum] = std::move(CreateMixer(tracks, selectionOnly,
+         //startTime, endTime,
+         //channels, inSamples, true,
+         //rate, floatSample, true, mixerSpec));
+         //futures.push(std::async(std::launch::async, &ExportMP3::Worker, mixers[mixerNum].get(), inSamples, channels, &exporter[mixerNum], std::move(buffers[mixerNum])));
          mixerNum = ++mixerNum % numThreads;
       }
-   }
+   
 
    if ( updateResult == ProgressResult::Success ||
         updateResult == ProgressResult::Stopped ) {
-      bytes = exporter[mixerNum].FinishStream(buffers[mixerNum].get());
+      ArrayOf<unsigned char> buffer { bufferSize };
+      bytes = exporter[mixerNum].FinishStream(buffer.get());
 
       if (bytes < 0) {
          // TODO: more precise message
@@ -2037,7 +2065,7 @@ for (int i = 0; i < numThreads; i++)
       }
 
       if (bytes > 0) {
-         if (bytes > (int)outFile.Write(buffers[mixerNum].get(), bytes)) {
+         if (bytes > (int)outFile.Write(buffer.get(), bytes)) {
             // TODO: more precise message
             ShowExportErrorDialog("MP3:1988");
             return ProgressResult::Cancelled;
