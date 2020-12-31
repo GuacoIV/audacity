@@ -13,7 +13,7 @@ These steps assume that all files present during development are in the review e
 
 ### Testing the Project
 Note that because TurboVNC does not provide audio from Udacity VM's, there are some debug assertions that occur when opening Audacity. These can be ignored.
-To test, drag the test file "/home/workspace/audacity/This Sick Beat.wav" (or another audio file of choice) into the Audacity editor. Then export to MP3 via File > Export > Export to MP3.
+To test, drag the test file "/home/workspace/audacity/This Sick Beat.wav" (or another audio file of choice) into the Audacity editor. Then export to MP3 via File > Export > Export as MP3.
 In order to hear the resulting file, it should be brought to another machine via a file sharing service.
 
 ### Class Structure
