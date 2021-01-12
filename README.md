@@ -8,8 +8,12 @@ This repository was forked from Audacity and contains a prototype of the paralle
 
 ### Build Instructions on Udacity VM
 These steps assume that all files present during development are in the review environment, as dependent CMake and wxWidgets builds are used by the preparation script. If not, the instructions found in the original Audacity README should be followed to work towards a build.
-1. From the terminal, in folder /home/workspace/audacity/build, run ./Prepare_VM_for_Build.sh
-2. Then, run the Visual Studio Code build configuration by pressing F5
+1. Extract the following archive: /home/workspace/cmake-3.19.0.tar.gz
+2. Clone the audacity fork of wxWidgets (which has bug fixes in it) in /home/workspace with: `git clone https://github.com/audacity/wxWidgets`
+3. Build wxWidgets by following the instructions at: https://github.com/audacity/wxWidgets/blob/audacity-fixes-3.1.3/docs/gtk/install.md
+2. Clone this repository in /home/workspace with: `git clone https://github.com/GuacoIV/audacity.git`
+3. From the terminal, in folder /home/workspace/audacity/build, run `./Prepare_VM_for_Build.sh`
+4. Then, run the Visual Studio Code build configuration by pressing F5
 
 ### Testing the Project
 Note that because TurboVNC does not provide audio from Udacity VM's, there are some debug assertions that occur when opening Audacity. These can be ignored.
