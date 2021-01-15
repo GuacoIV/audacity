@@ -9,7 +9,15 @@ This repository was forked from Audacity and contains a prototype of the paralle
 ### Build Instructions on Udacity VM
 These steps assume that all files present during development are in the review environment, as dependent CMake and wxWidgets builds are used by the preparation script. If not, the instructions found in the original Audacity README should be followed to work towards a build.
 1. Clone the audacity fork of wxWidgets (which has bug fixes in it) in /home/workspace with: `git clone https://github.com/audacity/wxWidgets`
-2. Build wxWidgets by following the instructions at: https://github.com/audacity/wxWidgets/blob/audacity-fixes-3.1.3/docs/gtk/install.md
+2. Build wxWidgets by running the following commands from the base directory of wxWidgets (as described at: https://github.com/audacity/wxWidgets/blob/audacity-fixes-3.1.3/docs/gtk/install.md)
+    ```
+    mkdir buildgtk
+    cd buildgtk
+    ../configure --with-gtk
+    make
+    make install
+    ldconfig
+    ```
 3. Clone this repository in /home/workspace with: `git clone https://github.com/GuacoIV/audacity.git`
 4. From the terminal, in folder /home/workspace/audacity/build, run `./Prepare_VM_for_Build.sh`
 5. Then, run the Visual Studio Code build configuration by pressing F5
